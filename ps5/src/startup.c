@@ -8,7 +8,6 @@
  * SPDX-License-Identifier: MIT
  */
 #include <dirent.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -83,32 +82,10 @@ seed_shader_caches(void)
    }
 }
 
-/* app_crt's _start. Its link address is the ELF e_entry (0x120: ps5-pie.ld's
- * two sentinel quads, then the CRT). The title is a PIE whose first LOAD has
- * p_vaddr 0, so the loader's base is this address minus e_entry. elf_aux_info
- * is declared by the SDK and exported by none of the stubs a title loads.
- * The same offset is logged again when the division table is installed. */
-extern char _start[];
-
-static void
-log_load_offset(void)
-{
-   const unsigned long link_entry = 0x120;
-   const unsigned long entry = (unsigned long)(uintptr_t)_start;
-
-   if (entry < link_entry) {
-      say("[cos] load offset unknown (_start %p)", (void *)entry);
-      return;
-   }
-   say("[cos] load offset 0x%lx (_start %p, link e_entry 0x%lx)", entry - link_entry,
-       (void *)entry, link_entry);
-}
-
 __attribute__((constructor)) static void
 ps5_startup(void)
 {
    platform_init(PS5_TITLE_NAME);
-   log_load_offset();
    seed_shader_caches();
    /* SDL_GetPrefPath is $XDG_DATA_HOME/<org>/<app>/: saves and settings. A title
     * sees its own folder (/app0, which is /data/homebrew/<TITLE_ID>) and nothing
