@@ -221,6 +221,129 @@ index 355f0e7..57070e1 100644
  }
  
  /* 8003EFA4-8003EFC8       .text fpcMtd_Create__FP20process_method_classPv */
+diff --git a/game/src/m_Do/m_Do_graphic.cpp b/game/src/m_Do/m_Do_graphic.cpp
+index 7bcada0..f22b7ac 100644
+--- a/game/src/m_Do/m_Do_graphic.cpp
++++ b/game/src/m_Do/m_Do_graphic.cpp
+@@ -4,6 +4,10 @@
+ //
+ 
+ #include "m_Do/machine.h" // IWYU pragma: keep
++#if defined(__PROSPERO__)
++#include <pthread.h>
++#include <stdio.h>
++#endif
+ #if TARGET_PC
+ #include "pc/pc_aspect.h"
+ #include "pc/pc_gpu_opts.h"
+@@ -1470,11 +1474,25 @@ out:
+ 
+ /* 8000AAC4-8000AB1C       .text mCaptureProc__FPv */
+ u32 mCaptureProc(void*) {
++#if defined(__PROSPERO__)
++    fprintf(stderr, "[cos] capture thread start OSThread=%p pthread=%p\n",
++            static_cast<void*>(OSGetCurrentThread()), static_cast<void*>(pthread_self()));
++    fflush(stderr);
++#endif
+     u32 bytesCopied = encode_s3tc(mCaptureCaptureBuffer, mCaptureTextureBuffer, mCaptureSizeWidth, mCaptureSizeHeight, (GXTexFmt)mCaptureCaptureFormat);
++#if defined(__PROSPERO__)
++    fprintf(stderr, "[cos] capture encode_s3tc done bytes=%u\n", bytesCopied);
++    fflush(stderr);
++#endif
+ #if VERSION == VERSION_JPN
+     DCFlushRange(mCaptureTextureBuffer, mCaptureTextureSize);
+ #elif VERSION > VERSION_JPN
+     DCStoreRange(mCaptureTextureBuffer, mCaptureTextureSize);
++#endif
++#if defined(__PROSPERO__)
++    fprintf(stderr, "[cos] capture thread exit OSThread=%p pthread=%p\n",
++            static_cast<void*>(OSGetCurrentThread()), static_cast<void*>(pthread_self()));
++    fflush(stderr);
+ #endif
+     OSExitThread((void*)bytesCopied);
+     return bytesCopied;
+@@ -1911,6 +1929,13 @@ bool mDoGph_Painter() {
+                     mCaptureStep = 5;
+                 } else {
+                     u8* captureThreadStackBase = mCaptureThreadStackHead + mCaptureThreadStackSize;
++#if defined(__PROSPERO__)
++                    fprintf(stderr,
++                            "[cos] capture thread create OSThread=%p stack=%p size=%u\n",
++                            static_cast<void*>(&mCaptureThread),
++                            static_cast<void*>(captureThreadStackBase), mCaptureThreadStackSize);
++                    fflush(stderr);
++#endif
+ #if TARGET_PC
+                     // Aurora declares the entry point with its real type, void* (*)(void*); the game passes a function
+                     // of another signature, as it did through the decomp's void*.
+diff --git a/native/sdk/src/os/OSThread.cpp b/native/sdk/src/os/OSThread.cpp
+index 9721467..9c9fbe0 100644
+--- a/native/sdk/src/os/OSThread.cpp
++++ b/native/sdk/src/os/OSThread.cpp
+@@ -217,6 +217,11 @@ void* ThreadEntry(void* arg) {
+     }
+     // Returning from the entry function is OSExitThread with its result, as on the GameCube
+     // (the entry's link register points at OSExitThread).
++#if defined(__PROSPERO__)
++    std::fprintf(stderr, "[cos] ThreadEntry end OSThread=%p pthread=%p\n",
++                 static_cast<void*>(thread), static_cast<void*>(pthread_self()));
++    std::fflush(stderr);
++#endif
+     OSExitThread(func(param));
+     return nullptr; // not reached
+ }
+@@ -592,6 +597,11 @@ void OSExitThread(void* val) {
+               "host thread)",
+               static_cast<void*>(self));
+     }
++#if defined(__PROSPERO__)
++    std::fprintf(stderr, "[cos] OSExitThread end OSThread=%p pthread=%p\n",
++                 static_cast<void*>(self), static_cast<void*>(pthread_self()));
++    std::fflush(stderr);
++#endif
+     self->val = val;
+     EndThreadLocked(self);
+     ExitCurrentLocked();
+diff --git a/native/sdk/tests/sdk_threads.cpp b/native/sdk/tests/sdk_threads.cpp
+index 26872bb..fef7063 100644
+--- a/native/sdk/tests/sdk_threads.cpp
++++ b/native/sdk/tests/sdk_threads.cpp
+@@ -130,6 +130,15 @@ void* BlockedReceiver(void*) {
+     return AsMessage(0xBAD); // not reached: cancelled while waiting
+ }
+ 
++// Ends only through OSExitThread, the path the picto box's capture thread takes.
++void* ExitOnlyThread(void*) {
++    OSExitThread(AsMessage(0xE417));
++    return AsMessage(0xBAD);
++}
++
++OSThread sExiter;
++Stack sExiterStack;
++
+ OSThread sPing, sPong, sCounters[kCounterThreads], sSleeper, sReceiver;
+ Stack sPingStack, sPongStack, sCounterStacks[kCounterThreads], sSleeperStack, sReceiverStack;
+ 
+@@ -170,6 +179,19 @@ void RearmHandler(OSAlarm* alarm, OSContext*) {
+ 
+ } // namespace
+ 
++// One OSCreateThread whose entry returns only through OSExitThread, then joined.
++COS_SMOKE_TEST(thread_exit) {
++    COS_SMOKE_CHECK(OSCreateThread(&sExiter, ExitOnlyThread, nullptr, sExiterStack.top(), kStackSize,
++                                   16, 0));
++    COS_SMOKE_CHECK(OSIsThreadSuspended(&sExiter));
++    COS_SMOKE_CHECK(OSResumeThread(&sExiter) == 1);
++    void* result = nullptr;
++    COS_SMOKE_CHECK(OSJoinThread(&sExiter, &result));
++    COS_SMOKE_CHECK(FromMessage(result) == 0xE417);
++    COS_SMOKE_CHECK(OSIsThreadTerminated(&sExiter));
++    return true;
++}
++
+ COS_SMOKE_TEST(threads) {
+     OSThread* self = OSGetCurrentThread();
+     COS_SMOKE_CHECK(self != nullptr);
 diff --git a/native/src/pc/features/pc_menu.cpp b/native/src/pc/features/pc_menu.cpp
 index 3a26b60..fb9c5f0 100644
 --- a/native/src/pc/features/pc_menu.cpp
@@ -317,6 +440,25 @@ index 43728f2..b3ce94c 100644
          if (!s.measured) {
              // Turned on a moment ago (options menu): nothing measured yet.
              ImGui::TextUnformatted("-- fps");
+diff --git a/native/src/pc/game_hooks/pc_capture.cpp b/native/src/pc/game_hooks/pc_capture.cpp
+index f69fa4d..f7b67f5 100644
+--- a/native/src/pc/game_hooks/pc_capture.cpp
++++ b/native/src/pc/game_hooks/pc_capture.cpp
+@@ -80,6 +80,14 @@ bool readTexture(const aurora::gfx::TextureHandle& handle, std::vector<uint8_t>&
+         return true;
+     }
+ #endif
++    // A copy texture without CopySrc is not a Vulkan transfer source. CopyTextureToBuffer then
++    // loses the device, and Aurora's uncaptured-error callback aborts (the picto box returns to
++    // the home menu). Skip the readback: writeGx leaves mid grey, which encode_s3tc accepts.
++    const auto copyUsage = static_cast<uint64_t>(handle->texture.GetUsage());
++    if ((copyUsage & static_cast<uint64_t>(wgpu::TextureUsage::CopySrc)) == 0) {
++        pc::writef(STDERR_FILENO, "[cos] capture: copy texture has no CopySrc usage; readback skipped\n");
++        return false;
++    }
+     const uint32_t width = handle->size.width;
+     const uint32_t height = handle->size.height;
+     const uint32_t bytesPerRow = (width * 4 + 255) & ~255u;
 diff --git a/native/src/pc/harness/pc_shot.cpp b/native/src/pc/harness/pc_shot.cpp
 index aef4e19..c2c3de0 100644
 --- a/native/src/pc/harness/pc_shot.cpp
@@ -942,22 +1084,3 @@ index 9cfa47a..0a822c8 100644
      applyFrameBufferScale(info.windowSize);
      if (pc_aspect_wide()) {
          // The game draws an anamorphic picture into the 640x480 EFB (pc_aspect.h): Aurora presents
-diff --git a/native/src/pc/game_hooks/pc_capture.cpp b/native/src/pc/game_hooks/pc_capture.cpp
-index a1b2c3d..d4e5f6a 100644
---- a/native/src/pc/game_hooks/pc_capture.cpp
-+++ b/native/src/pc/game_hooks/pc_capture.cpp
-@@ -80,6 +80,14 @@ bool readTexture(const aurora::gfx::TextureHandle& handle, std::vector<uint8_t>
-         return true;
-     }
- #endif
-+    // A copy texture without CopySrc is not a Vulkan transfer source. CopyTextureToBuffer then
-+    // loses the device, and Aurora's uncaptured-error callback aborts (the picto box returns to
-+    // the home menu). Skip the readback: writeGx leaves mid grey, which encode_s3tc accepts.
-+    const auto copyUsage = static_cast<uint64_t>(handle->texture.GetUsage());
-+    if ((copyUsage & static_cast<uint64_t>(wgpu::TextureUsage::CopySrc)) == 0) {
-+        pc::writef(STDERR_FILENO, "[cos] capture: copy texture has no CopySrc usage; readback skipped\n");
-+        return false;
-+    }
-     const uint32_t width = handle->size.width;
-     const uint32_t height = handle->size.height;
-     const uint32_t bytesPerRow = (width * 4 + 255) & ~255u;
